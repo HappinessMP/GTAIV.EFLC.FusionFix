@@ -42,12 +42,23 @@ public:
             bMenuNeedsUpdate2--;
             return 0;
         }
-        return *CTimer__m_UserPause;
+        return *CTimer::m_UserPause;
+    }
+
+    static inline injector::hook_back<int(__fastcall*)(int* _this, void* edx, int a2)> hbsub_B64D60;
+    static int __fastcall sub_B64D60(int* _this, void* edx, int a2)
+    {
+        auto r = hbsub_B64D60.fun(_this, edx, a2);
+
+        if (r == 4 && _this[21] == 32) // P90
+            r = hbsub_B64D60.fun(_this, edx, r);
+
+        return r;
     }
 
     Fixes()
     {
-        FusionFix::onInitEvent() += []()
+        FusionFix::onInitEventAsync() += []()
         {
             CIniReader iniReader("");
 
@@ -57,6 +68,9 @@ public:
             //[MISC]
             bool bDefaultCameraAngleInTLAD = iniReader.ReadInteger("MISC", "DefaultCameraAngleInTLAD", 0) != 0;
             bool bPedDeathAnimFixFromTBOGT = iniReader.ReadInteger("MISC", "PedDeathAnimFixFromTBOGT", 1) != 0;
+
+            //[SHADOWS]
+            bool bHighResolutionShadows = iniReader.ReadInteger("SHADOWS", "HighResolutionShadows", 0) != 0;
 
             //fix for zoom flag in tbogt
             if (nAimingZoomFix)
@@ -76,7 +90,7 @@ public:
                         *(uint8_t*)(regs.esi + 0x200) |= 1;
                         byte_F47AB1 = 1;
                     }
-                }; 
+                };
                 if (!pattern.empty())
                     injector::MakeInline<AimZoomHook1>(pattern.get_first(0), pattern.get_first(7));
                 else {
@@ -107,6 +121,20 @@ public:
                 else {
                     pattern = hook::pattern("88 1D ? ? ? ? 74 10");
                     injector::WriteMemory<uint8_t>(pattern.get_first(1), 0x25, true); //mov ah
+                }
+
+                //gamepad handler
+                pattern = find_pattern("88 8E ? ? ? ? 84 DB");
+                if (!pattern.empty())
+                {
+                    struct AimZoomHook3
+                    {
+                        void operator()(injector::reg_pack& regs)
+                        {
+                            *(uint8_t*)(regs.esi + 0x200) = regs.ecx & 0xFF;
+                            byte_F47AB1 = *(uint8_t*)(regs.esi + 0x200);
+                        }
+                    }; injector::MakeInline<AimZoomHook3>(pattern.get_first(0), pattern.get_first(6));
                 }
             }
 
@@ -184,11 +212,11 @@ public:
 
             // Make LOD lights appear at the appropriate time like on the console version (consoles: 7 PM, pc: 10 PM)
             {
-                auto pattern = find_pattern("8D 42 13", "8D 51 13");
-                injector::WriteMemory<uint8_t>(pattern.get_first(2), 0x10, true);
-                pattern = find_pattern("8D 42 14 3B C8", "83 C1 14 3B C1");
-                injector::WriteMemory<uint8_t>(pattern.get_first(2), 0x10, true);
-                injector::WriteMemory<uint8_t>(pattern.get_first(8), 0x07, true);
+                static uint32_t _dwTimeOffset = 0;
+                auto pattern = find_pattern("8B 15 ? ? ? ? 8B 0D ? ? ? ? 0F 45 0D", "8B 0D ? ? ? ? 8D 51 13 3B C2 75 4D E8");
+                injector::WriteMemory(pattern.get_first(2), &_dwTimeOffset, true);
+                pattern = find_pattern("2B 05 ? ? ? ? 3B C8 75 6C 83 3D", "2B 0D ? ? ? ? 3B C1 75 33 E8");
+                injector::WriteMemory(pattern.get_first(2), &_dwTimeOffset, true);
                 // Removing episode id check that resulted in flickering LOD lights at certain camera angles in TBOGT
                 pattern = hook::pattern("83 3D ? ? ? ? ? 0F 85 ? ? ? ? F3 0F 10 05 ? ? ? ? F3 0F 10 8C 24");
                 if (!pattern.empty())
@@ -228,12 +256,12 @@ public:
                             Natives::GetMouseInput(&x, &y);
 
                         if (x || y)
-                            nTimeToPassBeforeCenteringCameraOnFoot = *CTimer__m_snTimeInMilliseconds + ((pad ? nTimeToWaitBeforeCenteringCameraOnFootPad->get() : nTimeToWaitBeforeCenteringCameraOnFootKB->get()) * 1000);
+                            nTimeToPassBeforeCenteringCameraOnFoot = *CTimer::m_snTimeInMilliseconds + ((pad ? nTimeToWaitBeforeCenteringCameraOnFootPad->get() : nTimeToWaitBeforeCenteringCameraOnFootKB->get()) * 1000);
 
                         if (pad && !nTimeToWaitBeforeCenteringCameraOnFootPad->get())
                             nTimeToPassBeforeCenteringCameraOnFoot = 0;
 
-                        if (nTimeToPassBeforeCenteringCameraOnFoot < *CTimer__m_snTimeInMilliseconds)
+                        if (nTimeToPassBeforeCenteringCameraOnFoot < *CTimer::m_snTimeInMilliseconds)
                             posX = f;
                         else
                             posX = 0.0f;
@@ -301,89 +329,128 @@ public:
                 injector::MakeNOP(pattern.get_first(0), 16, true);
             }
 
-            // Fix for light coronas being rendered through objects in water reflections.
-            {
-                static auto bCoronaShader = false;
-                static DWORD CoronaDepth = 0;
-                static IDirect3DVertexShader9* CoronaVertexShader = nullptr;
-                FusionFix::D3D9::onAfterCreateVertexShader() += [](LPDIRECT3DDEVICE9& pDevice, DWORD*& pFunction, IDirect3DVertexShader9**& ppShader)
-                {
-                    static constexpr auto CoronaVertexShaderID = 15;
-                    if (GetFusionShaderID(*ppShader) == CoronaVertexShaderID)
-                        CoronaVertexShader = *ppShader;
-                };
-
-                FusionFix::D3D9::onBeforeDrawPrimitive() += [](LPDIRECT3DDEVICE9& pDevice, D3DPRIMITIVETYPE& PrimitiveType, UINT& StartVertex, UINT& PrimitiveCount)
-                {
-                    IDirect3DVertexShader9* vShader = nullptr;
-                    pDevice->GetVertexShader(&vShader);
-                    if (vShader && CoronaVertexShader && vShader == CoronaVertexShader)
-                    {
-                        bCoronaShader = true;
-                        pDevice->GetRenderState(D3DRS_ZENABLE, &CoronaDepth);
-                        pDevice->SetRenderState(D3DRS_ZENABLE, 1);
-                    }
-                };
-
-                FusionFix::D3D9::onAfterDrawPrimitive() += [](LPDIRECT3DDEVICE9& pDevice, D3DPRIMITIVETYPE& PrimitiveType, UINT& StartVertex, UINT& PrimitiveCount)
-                {
-                    if (bCoronaShader)
-                    {
-                        pDevice->SetRenderState(D3DRS_ZENABLE, CoronaDepth);
-                        bCoronaShader = false;
-                    }
-                };
-            }
-
             // Remove free cam boundary limits in the video editor.
             {
                 auto pattern = hook::pattern("73 5C 56 6A 00 6A 01 E8 ? ? ? ? 83 C4 0C 84 C0 74 4B");
                 if (!pattern.empty())
-                    injector::WriteMemory<uint8_t>(pattern.get_first(0), 0xEB, true);
-
-                pattern = hook::pattern("0F 86 ? ? ? ? 0F 2E FA 9F F6 C4 44 7A 05");
-                if (!pattern.empty())
                 {
-                    injector::WriteMemory(pattern.get_first(0), 0x0002EBE9, true);
-                    injector::WriteMemory(pattern.get_first(4), 0x2E0F9000, true);
-
-                    pattern = hook::pattern("0F 82 ? ? ? ? 80 8F ? ? ? ? ? F6 87");
+                    injector::WriteMemory<uint8_t>(pattern.get_first(0), 0xEB, true);
+             
+                    pattern = hook::pattern("0F 86 ? ? ? ? 0F 2E FA 9F F6 C4 44 7A 05");
                     if (!pattern.empty())
                     {
-                        injector::WriteMemory(pattern.get_first(0), 0x000097E9, true);
-                        injector::WriteMemory(pattern.get_first(4), 0x8F809000, true);
-                    }
-                    pattern = hook::pattern("72 48 0F 2F 44 24 ? 72 41 0F 28 C3");
-                    if (!pattern.empty())
+                        injector::WriteMemory<uint16_t>(pattern.get_first(0), 0xE990, true);
+                        pattern = hook::pattern("0F 82 ? ? ? ? 80 8F ? ? ? ? ? F6 87");
+                        injector::WriteMemory<uint16_t>(pattern.get_first(0), 0xE990, true);
+                        pattern = hook::pattern("72 48 0F 2F 44 24 ? 72 41 0F 28 C3");
                         injector::WriteMemory(pattern.get_first(0), 0x12EB, true);
-                    pattern = hook::pattern("72 6D 83 3D ? ? ? ? ? 74 1A A1");
-                    if (!pattern.empty())
-                        injector::WriteMemory(pattern.get_first(0), 0x6DEB, true);
+                        pattern = hook::pattern("72 6D 83 3D ? ? ? ? ? 74 1A A1");
+                        injector::WriteMemory<uint8_t>(pattern.get_first(0), 0xEB, true);
+                    }
+                    else
+                    {
+                        pattern = hook::pattern("0F 86 ? ? ? ? F3 0F 10 54 24 ? 0F 2E D4");
+                        injector::WriteMemory<uint16_t>(pattern.get_first(0), 0xE990, true);
+                        pattern = hook::pattern("0F 82 ? ? ? ? 80 8E ? ? ? ? ? F6 86");
+                        injector::WriteMemory<uint16_t>(pattern.get_first(0), 0xE990, true);
+                        pattern = hook::pattern("72 5F 0F 2F C5 72 5A 0F 2F FA 76 0E");
+                        injector::WriteMemory(pattern.get_first(0), 0x20EB, true);
+                        pattern = hook::pattern("0F 82 ? ? ? ? 83 3D ? ? ? ? ? 74 1A A1");
+                        injector::WriteMemory<uint16_t>(pattern.get_first(0), 0xE990, true);
+                    }
                 }
+            }
+
+            // Glass Shards Color Fix
+            {
+                static auto veh_glass_red = "veh_glass_red";
+                static auto veh_glass_amber = "veh_glass_amber";
+
+                auto pattern = hook::pattern("68 ? ? ? ? EB E2 6A 00 68");
+                if (!pattern.empty())
+                    injector::WriteMemory(pattern.get_first(1), &veh_glass_red[0], true);
+
+                pattern = hook::pattern("68 ? ? ? ? E8 ? ? ? ? 83 C4 08 89 44 24 0C 6A 00 6A 00");
+                if (!pattern.empty())
+                    injector::WriteMemory(pattern.get_first(1), &veh_glass_amber[0], true);
+            }
+
+            // Fix Cascaded Shadow Map Resolution
+            {
+                // Clamp night shadow resolution to 512x512 @ Very High (was 1024x1024)
+                auto pattern = hook::pattern("83 3D ? ? ? ? ? 7E 12 B8 ? ? ? ? D3 E0 B9 ? ? ? ? 3B C1 0F 4F C1 C3");
+                if (!pattern.empty())
+                    injector::WriteMemory(pattern.get_first(17), 0x200, true);
                 else
                 {
-                    pattern = hook::pattern("0F 86 ? ? ? ? F3 0F 10 54 24 ? 0F 2E D4");
-                    if (!pattern.empty())
-                    {
-                        injector::WriteMemory(pattern.get_first(0), 0x00032EE9, true);
-                        injector::WriteMemory(pattern.get_first(4), 0x0FF39000, true);
-                    }
-                    pattern = hook::pattern("0F 82 ? ? ? ? 80 8E ? ? ? ? ? F6 86");
-                    if (!pattern.empty())
-                    {
-                        injector::WriteMemory(pattern.get_first(0), 0x000090E9, true);
-                        injector::WriteMemory(pattern.get_first(4), 0x8E809000, true);
-                    }
-                    pattern = hook::pattern("72 5F 0F 2F C5 72 5A 0F 2F FA 76 0E");
-                    if (!pattern.empty())
-                        injector::WriteMemory(pattern.get_first(0), 0x20EB, true);
-                    pattern = hook::pattern("0F 82 ? ? ? ? 83 3D ? ? ? ? ? 74 1A A1");
-                    if (!pattern.empty())
-                    {
-                        injector::WriteMemory(pattern.get_first(0), 0x000091E9, true);
-                        injector::WriteMemory(pattern.get_first(4), 0x3D839000, true);
-                    }
+                    pattern = hook::pattern("3D ? ? ? ? 7E 05 B8 ? ? ? ? C3");
+                    injector::WriteMemory(pattern.count(2).get(0).get<void*>(1), 0x200, true);
+                    injector::WriteMemory(pattern.count(2).get(0).get<void*>(8), 0x200, true);
                 }
+
+                // Remove code that doubled shadow cascade resolution.
+                pattern = find_pattern("03 F6 E8 ? ? ? ? 8B 0D ? ? ? ? 8D 54 24 0C", "03 F6 E8 ? ? ? ? 8B 0D ? ? ? ? 8D 44 24 0C");
+                injector::MakeNOP(pattern.get_first(0), 2, true);
+
+                // Force water surface rendertarget resolution to always be 256x256. This matches the water tiling on the console version.
+                static uint32_t dwWaterQuality = 1;
+                pattern = find_pattern("8B 0D ? ? ? ? 53 BB ? ? ? ? D3 E3 85 D2 0F 85", "8B 0D ? ? ? ? BF ? ? ? ? D3 E7 85 C0 0F 85");
+                if (!pattern.empty())
+                {
+                    injector::WriteMemory(pattern.get_first(2), &dwWaterQuality, true);
+                    pattern = find_pattern("8B 0D ? ? ? ? F3 0F 10 0D ? ? ? ? B8 ? ? ? ? D3 E0 8B 0D", "8B 0D ? ? ? ? F3 0F 10 05 ? ? ? ? 6A 02 6A 01 BA");
+                    injector::WriteMemory(pattern.get_first(2), &dwWaterQuality, true);
+                    pattern = find_pattern("8B 0D ? ? ? ? BE ? ? ? ? D3 E6 83 3D", "8B 0D ? ? ? ? F3 0F 11 0D ? ? ? ? F3 0F 10 0D");
+                    injector::WriteMemory(pattern.get_first(2), &dwWaterQuality, true);
+                }
+
+                // Switch texture formats
+                // CASCADE_ATLAS
+                pattern = find_pattern("C7 05 ? ? ? ? ? ? ? ? C7 05 ? ? ? ? ? ? ? ? 8B 08 50 FF 51 08 5E 59 C3 8B 44 24 04 6A 72", "C7 05 ? ? ? ? ? ? ? ? C7 05 ? ? ? ? ? ? ? ? 8B 08");
+                injector::WriteMemory(pattern.get_first(6), rage::getEngineTextureFormat(D3DFMT_R32F), true);
+
+                // _DEFERRED_GBUFFER_0_ / _DEFERRED_GBUFFER_1_ / _DEFERRED_GBUFFER_2_
+                pattern = find_pattern("BA ? ? ? ? 84 C0 0F 45 CA 8B 15", "40 05 00 00 00 8B 0D ? ? ? ? 8B 11 8B 52 38 8D 74 24 14 56 50 A1");
+                injector::WriteMemory(pattern.get_first(1), rage::getEngineTextureFormat(D3DFMT_A8R8G8B8), true);
+            }
+
+            // P90 Selector Fix (Prev Weapon key)
+            {
+                auto pattern = hook::pattern("E8 ? ? ? ? 8B F0 3B 37 75 88");
+                if (!pattern.empty())
+                    hbsub_B64D60.fun = injector::MakeCALL(pattern.get_first(0), sub_B64D60).get();
+            }
+
+            // Disable Z-write for emmissive shaders. Fixes visual bugs e.g. strobe lights in Bahama Mamas (TBoGT) and more.
+            {
+                static uint32_t* dwEFB1B8 = *hook::pattern("6A 01 6A 10 89 3D").get_first<uint32_t*>(6);
+                auto pattern = find_pattern("83 FF 05 74 05 83 FF 04 75 26 6A 00 6A 0C E8 ? ? ? ? 83 C4 08 85 C0 74 0B 6A 01 8B C8 E8", "83 FF 05 74 05");
+                static uintptr_t loc_6E39F3 = (uintptr_t)find_pattern("8B 45 0C 8B 4C 24 18 33 F6 33 D2 89 74 24 1C 66 3B 54 C1", "8B 4D 0C 66 83 7C CE").get_first(0);
+                struct EmissiveDepthWriteHook
+                {
+                    void operator()(injector::reg_pack& regs)
+                    {
+                        // Fix for visual bugs in QUB3D that will occur with this fix. Only enable z-write for emissives shaders when the camera/player height is 3000 or higher.
+                        // This height check was present in patch 1.0.4.0 and was removed in patch 1.0.6.0+, in addition Z-write for emissive shaders was enabled permanently.
+                        if ((regs.edi == 5 || regs.edi == 4) && *(float*)(*dwEFB1B8 + 296) < 3000.0f)
+                        {
+                        }
+                        else
+                        {
+                            *(uintptr_t*)(regs.esp - 4) = loc_6E39F3;
+                        }
+                    }
+                }; injector::MakeInline<EmissiveDepthWriteHook>(pattern.get_first(0), pattern.get_first(10));
+
+                pattern = find_pattern("6A 01 8B C8 E8 ? ? ? ? EB 02 33 C0 50 E8 ? ? ? ? 83 C4 04 8B 45 0C 8B 4C 24 18", "6A 01 8B C8 E8 ? ? ? ? EB 02 33 C0 8B C8 E8 ? ? ? ? 8B 4D 0C");
+                injector::WriteMemory<uint8_t>(pattern.get_first(1), 0, true);
+            }
+
+            // Water Foam Height Weirdness
+            {
+                auto pattern = hook::pattern("F3 0F 58 0D ? ? ? ? 83 EC 08 F3 0F 59 05");
+                if (!pattern.empty())
+                    injector::MakeNOP(pattern.get_first(0), 8, true);
             }
         };
     }
